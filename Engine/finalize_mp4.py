@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import shutil,struct,sys
+import mmap,shutil,struct,sys
 
 def boxes(b,s=0,e=None):
  e=len(b) if e is None else e;p=s
@@ -44,7 +44,10 @@ def set_first_elst(b,tr,duration):
 def resize_remove(b,moov,tr,box):
  n=box[1];struct.pack_into(">I",b,moov[0],moov[1]-n);struct.pack_into(">I",b,tr[0],tr[1]-n);del b[box[0]:box[0]+n];return n
 def grow_free(b,n):
- fr=next(x for x in boxes(b) if x[2]==b"free");old=bytes(b[fr[0]:fr[0]+fr[1]]);new=struct.pack(">I4s",fr[1]+n,b"free")+old[8:]+b"\0"*n;b[fr[0]:fr[0]+fr[1]]=new
+ fr=next(x for x in boxes(b) if x[2]==b"free");old=bytes(b[fr[0]:fr[0]+fr[1]]);newsize=fr[1]+n
+ if newsize<8:raise ValueError("insufficient top-level free space")
+ payload=old[8:newsize] if n<0 else old[8:]+b"\0"*n
+ b[fr[0]:fr[0]+fr[1]]=struct.pack(">I4s",newsize,b"free")+payload
 def remove_lavf(b):
  mo=next(x for x in boxes(b) if x[2]==b"moov");ud=next((x for x in kids(b,mo) if x[2]==b"udta"),None)
  if not ud:return b
@@ -58,28 +61,31 @@ def remove_lavf(b):
  for x in (mo,ud,me,il):struct.pack_into(">I",b,x[0],x[1]-n)
  del b[too[0]:too[0]+n];grow_free(b,n);return b
 def replace_udta(b,source):
- sm=next(x for x in boxes(source) if x[2]==b"moov");su=child(source,sm,b"udta");orig=bytes(source[su[0]:su[0]+su[1]])
- mo=next(x for x in boxes(b) if x[2]==b"moov");du=child(b,mo,b"udta");delta=du[1]-len(orig)
- struct.pack_into(">I",b,mo[0],mo[1]-delta);b[du[0]:du[0]+du[1]]=orig;grow_free(b,delta);return b
+ sm=next(x for x in boxes(source) if x[2]==b"moov");su=next((x for x in kids(source,sm) if x[2]==b"udta"),None)
+ mo=next(x for x in boxes(b) if x[2]==b"moov");du=next((x for x in kids(b,mo) if x[2]==b"udta"),None);orig=bytes(source[su[0]:su[0]+su[1]]) if su else b""
+ if du:pos,old=du[0],du[1]
+ else:pos,old=next(x for x in kids(b,mo) if x[2]==b"trak")[0],0
+ delta=len(orig)-old;struct.pack_into(">I",b,mo[0],mo[1]+delta);b[pos:pos+old]=orig;grow_free(b,-delta);return b
 def restore_ftyp(b,source):
  sf=next(x for x in boxes(source) if x[2]==b"ftyp");df=next(x for x in boxes(b) if x[2]==b"ftyp");orig=bytes(source[sf[0]:sf[0]+sf[1]]);delta=df[1]-len(orig)
  if delta<0:raise ValueError("source ftyp larger")
  fr=next(x for x in boxes(b) if x[2]==b"free");old=bytes(b[fr[0]:fr[0]+fr[1]]);newfree=struct.pack(">I4s",fr[1]+delta,b"free")+old[8:]+b"\0"*delta
  return bytearray(orig+bytes(b[df[0]+df[1]:fr[0]])+newfree+bytes(b[fr[0]+fr[1]:]))
-def source_android_value(source):
- sm=next(x for x in boxes(source) if x[2]==b"moov");me=child(source,sm,b"meta");il=child(source,me,b"ilst");item=next(x for x in kids(source,il) if x[2]==b"\0\0\0\1");da=child(source,item,b"data")
- return bytes(source[da[0]+16:da[0]+da[1]])
-def android_meta(value):
- hdlr=struct.pack(">I4s",32,b"hdlr")+b"\0\0\0\0\0\0\0\0mdta"+b"\0"*12
- key=b"com.android.version";entry=struct.pack(">I4s",8+len(key),b"mdta")+key
- keys=struct.pack(">I4s",16+len(entry),b"keys")+b"\0\0\0\0"+struct.pack(">I",1)+entry
- data=struct.pack(">I4s",16+len(value),b"data")+b"\0\0\0\1\0\0\0\0"+value
- item=struct.pack(">I4s",8+len(data),b"\0\0\0\1")+data
- ilst=struct.pack(">I4s",8+len(item),b"ilst")+item
- body=hdlr+keys+ilst
- return struct.pack(">I4s",8+len(body),b"meta")+body
-def set_android_meta(b,source):
- raw=android_meta(source_android_value(source));mo=next(x for x in boxes(b) if x[2]==b"moov");existing=next((x for x in kids(b,mo) if x[2]==b"meta"),None)
+def strip_temporal_layer_value(raw):
+ b=bytearray(raw);meta=(0,len(b),b"meta",8);keys=child(b,meta,b"keys");q=keys[0]+keys[3]+4;count=struct.unpack_from(">I",b,q)[0];p=q+4;index=None
+ for i in range(1,count+1):
+  z=struct.unpack_from(">I",b,p)[0];typ=bytes(b[p+4:p+8]);value=bytes(b[p+8:p+z])
+  if typ==b"mdta" and value==b"com.android.video.temporal_layers_count":index=i
+  p+=z
+ if index is None:return bytes(b)
+ ilst=child(b,meta,b"ilst");item=next((x for x in kids(b,ilst) if x[2]==struct.pack(">I",index)),None)
+ if item:
+  n=item[1];struct.pack_into(">I",b,0,len(b)-n);struct.pack_into(">I",b,ilst[0],ilst[1]-n);del b[item[0]:item[0]+n]
+ return bytes(b)
+def set_movie_meta(b,source):
+ sm=next(x for x in boxes(source) if x[2]==b"moov");source_meta=next((x for x in kids(source,sm) if x[2]==b"meta"),None)
+ raw=strip_temporal_layer_value(bytes(source[source_meta[0]:source_meta[0]+source_meta[1]])) if source_meta else b""
+ mo=next(x for x in boxes(b) if x[2]==b"moov");existing=next((x for x in kids(b,mo) if x[2]==b"meta"),None)
  if existing:pos,old=existing[0],existing[1]
  else:
   tracks=[x for x in kids(b,mo) if x[2]==b"trak"];eis=next(x for x in tracks if handler(b,x)==b"meta");pos=eis[0];old=0
@@ -111,9 +117,11 @@ def video_sample_entry(b,tr):
 def restore_dovi_config(b,source,sv,dv):
  sstsd,sentry=video_sample_entry(source,sv);dstsd,dentry=video_sample_entry(b,dv)
  schild=next((x for x in boxes(source,sentry[0]+86,sentry[0]+sentry[1]) if x[2] in (b"dvvC",b"dvcC")),None)
- if not schild:raise ValueError("source Dolby Vision configuration box missing")
- raw=bytes(source[schild[0]:schild[0]+schild[1]])
  existing=next((x for x in boxes(b,dentry[0]+86,dentry[0]+dentry[1]) if x[2] in (b"dvvC",b"dvcC")),None)
+ if not schild:
+  if existing:raise ValueError("SDR source unexpectedly produced a Dolby Vision configuration box")
+  return b
+ raw=bytes(source[schild[0]:schild[0]+schild[1]])
  if existing:
   if existing[1]!=len(raw):raise ValueError("unexpected destination Dolby Vision box size")
   b[existing[0]:existing[0]+existing[1]]=raw;return b
@@ -130,23 +138,22 @@ def restore_dovi_config(b,source,sv,dv):
  b[fr[0]:fr[0]+fr[1]]=struct.pack(">I4s",newsize,b"free")+old[8:8+newsize-8]
  return b
 def main(src,base,dst):
- s=bytearray(open(src,"rb").read());b=bytearray(open(base,"rb").read());b=remove_lavf(b);b=replace_udta(b,s);b=restore_ftyp(b,s);b=set_android_meta(b,s)
- sm=next(x for x in boxes(s) if x[2]==b"moov");dm=next(x for x in boxes(b) if x[2]==b"moov");sts,sdu=read_mvhd(s,child(s,sm,b"mvhd"));stracks=[x for x in kids(s,sm) if x[2]==b"trak"]
- dtracks=[x for x in kids(b,dm) if x[2]==b"trak"];sv=next(x for x in stracks if handler(s,x)==b"vide");sa=next(x for x in stracks if handler(s,x)==b"soun");se=next(x for x in stracks if handler(s,x)==b"meta")
- dv=next(x for x in dtracks if handler(b,x)==b"vide");da=next(x for x in dtracks if handler(b,x)==b"soun");de=next(x for x in dtracks if handler(b,x)==b"meta")
- set_mvhd(b,child(b,dm,b"mvhd"),sts,sdu,max(4,len(dtracks)+1));settk(b,dv,tkdur(s,sv));set_tk_matrix(b,dv,tk_matrix(s,sv));set_first_elst(b,dv,tkdur(s,sv));settk(b,da,tkdur(s,sa));settk(b,de,tkdur(s,se))
- set_md_duration(b,dv,md_duration(s,sv));set_md_duration(b,da,md_duration(s,sa))
- for source_track,dest_track in ((sv,dv),(sa,da),(se,de)):set_md_language(b,dest_track,md_language(s,source_track))
- set_name(b,da,"SoundHandle")
- # Source audio has no edit list; remove the muxer-added zero edit.
- ed=next((x for x in kids(b,da) if x[2]==b"edts"),None)
- if ed:
-  n=resize_remove(b,dm,da,ed);grow_free(b,n)
- # Append every source top-level UUID exactly once.
- for p,z,t,h in boxes(s):
-  if t==b"uuid":
-   raw=bytes(s[p:p+z])
-   if raw not in b:b.extend(raw)
- b=restore_dovi_config(b,s,sv,dv)
- open(dst,"wb").write(b)
+ with open(src,"rb") as sf,open(base,"rb") as bf:
+  s=mmap.mmap(sf.fileno(),0,access=mmap.ACCESS_READ);base_map=mmap.mmap(bf.fileno(),0,access=mmap.ACCESS_READ);base_top=list(boxes(base_map));first_mdat=next(x for x in base_top if x[2]==b"mdat")[0]
+  b=bytearray(base_map[:first_mdat]);b=remove_lavf(b);b=replace_udta(b,s);b=restore_ftyp(b,s);b=set_movie_meta(b,s)
+  sm=next(x for x in boxes(s) if x[2]==b"moov");dm=next(x for x in boxes(b) if x[2]==b"moov");sts,sdu=read_mvhd(s,child(s,sm,b"mvhd"));stracks=[x for x in kids(s,sm) if x[2]==b"trak"]
+  dtracks=[x for x in kids(b,dm) if x[2]==b"trak"];sv=next(x for x in stracks if handler(s,x)==b"vide");sa=next(x for x in stracks if handler(s,x)==b"soun");se=next(x for x in stracks if handler(s,x)==b"meta")
+  dv=next(x for x in dtracks if handler(b,x)==b"vide");da=next(x for x in dtracks if handler(b,x)==b"soun");de=next(x for x in dtracks if handler(b,x)==b"meta")
+  set_mvhd(b,child(b,dm,b"mvhd"),sts,sdu,max(4,len(dtracks)+1));settk(b,dv,tkdur(s,sv));set_tk_matrix(b,dv,tk_matrix(s,sv));set_first_elst(b,dv,tkdur(s,sv));settk(b,da,tkdur(s,sa));settk(b,de,tkdur(s,se))
+  set_md_duration(b,dv,md_duration(s,sv));set_md_duration(b,da,md_duration(s,sa))
+  for source_track,dest_track in ((sv,dv),(sa,da),(se,de)):set_md_language(b,dest_track,md_language(s,source_track))
+  set_name(b,da,"SoundHandle")
+  ed=next((x for x in kids(b,da) if x[2]==b"edts"),None)
+  if ed:n=resize_remove(b,dm,da,ed);grow_free(b,n)
+  b=restore_dovi_config(b,s,sv,dv)
+  source_uuids=[bytes(s[p:p+z]) for p,z,t,h in boxes(s) if t==b"uuid"]
+  with open(dst,"wb") as out:
+   out.write(b);bf.seek(first_mdat);shutil.copyfileobj(bf,out,8*1024*1024)
+   for raw in source_uuids:out.write(raw)
+  s.close();base_map.close()
 if __name__=="__main__":main(*sys.argv[1:4])

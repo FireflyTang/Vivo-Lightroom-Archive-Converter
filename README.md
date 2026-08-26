@@ -1,133 +1,155 @@
 # Vivo Lightroom Archive Converter
 
-A narrowly scoped macOS converter for a specific Vivo X200 Ultra HEVC recording profile that Lightroom Classic cannot import directly.
+一个面向 Vivo X200 Ultra 特定 HEVC 录像结构的 macOS 档案转换工具。原片可正常播放和解码，但其三时间子层 HEVC 码流无法被 Lightroom Classic 的 Adobe MediaCore 打开。本工具将视频规范化为单时间层 HEVC，同时尽可能保持画面规格、时间、音频、EIS、Dolby Vision 与拍摄元信息。
 
-> This is not a general-purpose video converter. Inputs are rejected unless their container, tracks, sample descriptions, HDR metadata and temporal-layer structure match the validated reference profile.
+> 这不是通用视频转换器。目前只在 Vivo X200 Ultra 上验证。无法证明安全处理的设备、轨道、编码或元信息结构会被拒绝，不会猜测性转换。
 
-> **验证范围：目前只在 Vivo X200 Ultra 的这一种录制结构上验证通过。其他 Vivo 机型、其他拍摄模式或结构不同的 X200 Ultra 文件都会被拒绝，不会尝试猜测性转换。**
+## v1.9 已验证输入
 
-中文说明为主；关键安装命令和错误信息均可直接复制使用。
+v1.9 对 86 个无法导入 Lightroom 的 Vivo X200 Ultra 原片做了完整只读盘点，支持以下三种档案：
 
-## 背景：为什么需要转换
+| 档案 | 视频 | 色彩 | Dolby Vision |
+|---|---|---|---|
+| 1080p30 SDR | HEVC Main、8-bit、4:2:0 | BT.709 limited | 无 |
+| 4K60 SDR | HEVC Main、8-bit、4:2:0 | BT.709 limited | 无 |
+| 4K60 HLG/DV | HEVC Main 10、10-bit、4:2:0 | BT.2020 HLG limited | Profile 8.4 |
 
-已验证的源文件是 Vivo X200 Ultra 生成的 4K60、HEVC Main 10、HLG、Dolby Vision Profile 8.4 视频。文件没有损坏，QuickTime 和 FFmpeg 均能正常播放或完整解码；但 Lightroom Classic 的视频导入器并不是“能播放就能导入”，它会先用 Adobe MediaCore 解析 MP4 和 HEVC 头部。
+三类原片都必须具有 `hvc1` 视频、AAC-LC 48 kHz 双声道、Vivo `mett` EIS 数据轨，以及声明三个 temporal sub-layers 的 VPS/SPS。支持原片的 0°、90°、180°和270°正交显示矩阵；GPS可以存在或缺失。
 
-这类原片的 VPS/SPS 声明三个 HEVC temporal sub-layers。实际边界测试表明：Lightroom 可以接受规范化后的 MP4、`hvc1`、HEVC Main 10、4K60、BT.2020 HLG、AAC，以及保留下来的 Dolby Vision/EIS/拍摄元数据；直接触发失败的是原始三时间子层 HEVC 结构。失败发生在打开文件阶段，尚未进入正常画面解码。
+## 为什么必须转换视频
 
-因此本工具把视频重新编码为 Lightroom 已验证可接受的**单时间层 HEVC Main 10 HLG**，而不是降为 H.264 或 SDR。这里所说的“Lightroom 接受要求”是针对本机和这组样本得到的兼容性边界，不代表 Adobe 对所有版本、平台和编码器的官方完整规格。
+这些原片的共同特征是：
 
-本工具只重新编码视频基础层为单时间层 HEVC，同时尽可能原样保留：
+```text
+vps_max_sub_layers_minus1 = 2
+sps_max_sub_layers_minus1 = 2
+```
 
-- 3840×2160、60 fps、10-bit、BT.2020 HLG；
-- 原始显示时间戳 PTS；
-- AAC 包内容与时间；
-- Vivo EIS metadata 包内容与时间；
-- Dolby Vision RPU 与 `dvvC` 配置；
-- 旋转矩阵、GPS、拍摄时间、Android/Vivo 私有元数据；
-- 原始文件 SHA-256 和转换方式 provenance。
+也就是声明三个 HEVC 时间子层。QuickTime 和 FFmpeg 可以正常处理，但已测试的 Lightroom Classic 版本在打开阶段失败。重封装、去除 Dolby Vision、修改时间戳或只保留基础层都不能解决；经过边界实验，Lightroom 可以接受同等画面规格和元信息组合，但 HEVC 必须重新编码成正常的单时间层码流。
 
-必然变化的部分包括视频压缩数据、GOP/DTS、HEVC 参数集、三时间层到单时间层、码率和 MP4 内部数据排布。`com.android.video.temporal_layers_count=3` 不会作为输出的活跃属性保留，而是记录在 provenance 中，避免错误描述单层输出。
+## 未知元信息安全规则
 
-## v1.8 输出模式
+“不认识”不等于删除。v1.9 为每个输入建立元信息账本：
+
+- 边界独立的未知顶层 UUID、`udta` 和 movie metadata 项按不透明字节保存；
+- AAC 和 EIS 的压缩包、内容与时间逐包保存；
+- 与新 MP4/HEVC 结构有关的时长、偏移、参数集和单层声明按语义重建；
+- 原片的活动 `com.android.video.temporal_layers_count=3` 值必须移除，避免错误描述单层输出，原值写入 provenance；
+- 未知且可能引用原始帧号、sample、GOP、轨道或字节偏移的结构会导致拒绝。
+
+原片没有 GPS 时，输出同样没有 GPS；工具不会虚构空位置。Vivo 私有 UUID 不再要求固定字段集合，而是整个 box 原样复制并在输出端逐字节核验。
+
+## 自适应转换
+
+工具不会把 SDR 升格成 HDR，也不会把 8-bit 升格成10-bit：
+
+- 1080p/4K SDR 保持 HEVC Main、8-bit、BT.709；
+- 4K HLG/DV 保持 HEVC Main 10、10-bit、BT.2020 HLG；
+- 保持原分辨率、帧数、显示 PTS集合和显示矩阵；
+- Dolby Vision 仅在原片存在时逐帧重新注入原始 RPU，并恢复原始 `dvvC`；
+- 不做缩放、像素旋转、帧率转换、tone mapping 或 SDR/HDR互转。
 
 | 模式 | 编码器 | 输出文件名 | 定位 |
 |---|---|---|---|
 | 默认 | x265 `CRF 8`, medium | `*_LR_CRF8_archive.mp4` | 长期档案，画质优先 |
 | 实验 | Apple VideoToolbox `Q65` | `*_LR_VT_Q65_archive.mp4` | 速度和体积优先 |
 
-在参考片段上的客观比较：x265 CRF 8 为 PSNR 55.83 dB / SSIM 0.998472；VideoToolbox Q65 为 PSNR 47.93 dB / SSIM 0.993229。VideoToolbox 使用苹果媒体引擎，但解码、像素转换、封装和验证仍会占用 CPU。
+在本次代表样片上，CPU CRF 8 的原生色彩域抽样结果为 PSNR 52.89–59.17 dB、SSIM 0.997634–0.999142；VideoToolbox样片为 PSNR 43.96–52.01 dB、SSIM 0.988443–0.995377。指标随内容变化，仅用于回归和发现错误，不代表所有视频的固定结果。
 
-## 每个文件的安全流程
+## 每个输出的独立复检
 
-1. 输入先做严格指纹检查；不匹配则拒绝。
-2. 在原片旁创建隐藏的临时输出。
-3. 完成视频编码、Dolby Vision 注入、AAC/EIS 恢复和 MP4 封装。
-4. 对临时输出逐项复检。
-5. 只有全部通过才原子重命名为正式输出。
+临时输出必须全部通过以下检查才会原子重命名为正式文件：
 
-输出复检覆盖：视频参数和方向、帧数与 PTS、AAC/EIS 逐包哈希、Dolby Vision 配置和 RPU、单时间层语法、完整解码、MP4/UUID/拍摄元数据以及 provenance。失败时不会覆盖原片或已有输出，也不会留下正式文件。
+1. 视频 codec/profile、分辨率、位深、色彩、range和时间基与原片一致；
+2. 显示矩阵、轨道时间刻度、时长、语言和 EIS样本描述一致；
+3. 视频帧数与完整显示 PTS 集合一致；
+4. AAC 和 EIS 的 packet 属性与 payload SHA-256 逐包一致；
+5. 所有源顶层 UUID、`udta`、GPS和未知独立元信息通过字节级账本；
+6. SDR 的 Dolby Vision 存在性保持为无；HDR/DV 的配置与逐帧 RPU逐字节一致；
+7. 输出 VPS/SPS 声明一层，并扫描完整 HEVC码流确认所有 NAL 的 `temporal_id=0`；
+8. 全部可见容器和轨道元数据逐字段一致；
+9. 在不旋转、不缩放、不 tone map 的原生色彩域做 PSNR/SSIM抽样；
+10. 完整解码/读取所有输出轨道；
+11. 独立复算原片 SHA-256、大小、文件修改时间与 provenance；
+12. 任一检查失败时不留下正式输出，也不覆盖原片或已有文件。
 
-## 系统要求与首次安装
+测试脚本还会在输出副本中分别篡改未知 UUID、方向矩阵、AAC包、EIS包和 temporal-id，确认核验器能针对每种损坏拒绝通过。
+
+## 大文件与批量处理
+
+v1.9 将 NAL、AAC、EIS、MP4 media data、哈希和最终写入改成流式处理；不再把整部视频或全部压缩包一次性装入内存。转换仍需要同时容纳编码中间文件和最终输出的磁盘空间。原目录中已盘点到 6.55 GB单文件，因此开始批量转换前应预留明显高于原片总大小的空间。
+
+## 系统要求与依赖
 
 - Apple Silicon Mac；
 - macOS 14 或更新版本；
 - [Homebrew](https://brew.sh/)；
-- 大约 1 GB 可用空间用于依赖和转换临时文件，实际转换还需要足够的输出空间。
+- FFmpeg、Python 3.12、PyAV 18.1.0；
+- `dovi_tool`（只有 Dolby Vision输入在转换时需要，但安装脚本统一安装）。
 
-Release 不捆绑 FFmpeg、PyAV 或 dovi_tool。解压后双击 `install_dependencies.command`。它会通过官方包渠道执行：
+Release 不捆绑第三方运行库。解压后双击 `install_dependencies.command`，脚本执行：
 
 ```bash
 brew install ffmpeg python@3.12 dovi_tool
 ```
 
-并在以下专用虚拟环境安装固定版本 PyAV 18.1.0：
+并在下面的专用虚拟环境安装固定版本 PyAV：
 
 ```text
 ~/Library/Application Support/VivoLightroomArchiveConverter/venv
 ```
 
-脚本不会安装 Homebrew 本身。如果没有 Homebrew，请先按照 [brew.sh](https://brew.sh/) 的官方说明安装。App 启动时会检查全部依赖；缺少任何一项时禁止转换并给出明确提示。
-
-### 为什么不把 FFmpeg 直接塞进 App
-
-- FFmpeg 的许可取决于具体构建选项，可能是 LGPL 或 GPL；
-- Homebrew 的 FFmpeg 可独立接收安全更新和 codec 修复；
-- 避免 Release 重复携带 PyAV wheel 中的一整套 FFmpeg 动态库；
-- 用户可以清楚审计实际调用的工具和版本。
-
-详细版本、许可证和上游链接见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+App 启动时检查依赖。详细版本、许可证和上游链接见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 使用
 
-1. 将 App 移到“应用程序”文件夹并打开。
-2. 拖入一个或多个原始 MP4，或点击“选择视频…”。
-3. 等待每个文件完成输入检查。
-4. 保持默认 x265，或主动勾选实验性的 VideoToolbox 模式。
-5. 点击“转换全部合格项”。
-6. 表格显示“完成并通过复检”后，再导入 Lightroom。
+1. 将 App 移到“应用程序”文件夹并打开；
+2. 拖入一个或多个原始 MP4，或使用“选择视频…”；
+3. 查看每个文件的档案分类、方向、HDR/DV、EIS、拍摄字段和元信息安全账本；
+4. 等待检查完成；只有合格原片进入转换队列；
+5. 使用默认 x265，或主动选择实验性的 VideoToolbox；
+6. 点击“转换全部合格项”；
+7. 只有显示“完成并通过复检”的输出才应导入 Lightroom。
 
-输出放在原片旁边。工具永不覆盖原片或同名输出。
+输出放在原片旁边。工具不会上传视频、GPS、元数据或哈希。
 
-本 Release 使用 ad-hoc 签名，未使用 Apple Developer ID 公证。首次打开可能需要在 Finder 中右键 App，选择“打开”，再确认一次。只有从本仓库 Release 下载且校验 SHA-256 后才应放行。
+本 Release 使用 ad-hoc 签名，未使用 Apple Developer ID 公证。首次打开可能需要在 Finder 中右键 App，选择“打开”。
 
-## 从源码构建
-
-先安装 Xcode Command Line Tools，然后运行：
+## 从源码构建与测试
 
 ```bash
 ./build_app.sh
+python3 -m py_compile Engine/*.py Tests/*.py
 ```
 
-构建结果为 `build/Vivo Lightroom Archive Converter.app`。构建过程只编译 Objective-C/AppKit 前端并复制 Python 引擎源码，不下载或嵌入运行依赖。
+使用已有的已验证原片与输出运行破坏性副本测试：
+
+```bash
+python3 Tests/negative_validation.py SOURCE.mp4 VERIFIED_OUTPUT.mp4
+```
+
+测试只修改临时副本。构建结果位于 `build/Vivo Lightroom Archive Converter.app`。
 
 ## 项目结构
 
 ```text
 AppKit/main.m                  macOS GUI、拖放与批量队列
-Engine/converter_engine.py    输入审计和转换编排
-Engine/mux_exact.py           视频 PTS 与原始 AAC 精确复用
-Engine/inject_eis.py          EIS metadata 轨道复制
-Engine/finalize_mp4.py        MP4、方向与拍摄元数据恢复
-Engine/validate_output.py     独立输出复检
-Engine/append_provenance.py   来源 SHA-256 与转换记录
-Resources/                    Info.plist 和图标
+Engine/converter_engine.py    输入分类、安全账本和转换编排
+Engine/mux_exact.py           流式恢复视频 PTS 与原始 AAC
+Engine/inject_eis.py          流式复制 EIS metadata 轨道
+Engine/finalize_mp4.py        方向、拍摄信息与未知独立元信息恢复
+Engine/validate_output.py     独立输出复检与画质抽样
+Engine/append_provenance.py   来源 SHA-256 与必要变化记录
+Tests/                        反向篡改回归测试
 ```
 
-## 限制
+## 限制与声明
 
-- 目前只在 README 所述的 Vivo X200 Ultra 录制结构上验证通过；
-- 输入即使可以正常播放，只要结构指纹不同也会拒绝；
-- 视频必须重新编码，因此不可能与原片逐像素完全相同；
-- 保留的 Dolby Vision RPU 来自原片，但会作用于重新编码后的基础层；
-- VideoToolbox Q65 是实验选项，长期档案推荐 x265 CRF 8；
-- Release 目前仅构建和测试 Apple Silicon。
-
-## 隐私
-
-所有媒体处理均在本机完成。工具不会上传视频、GPS、元数据或哈希。网络仅在用户运行依赖安装脚本时由 Homebrew/PyPI 下载公开软件包。
-
-## 许可证与声明
+- 目前只在 Vivo X200 Ultra 和上述三种档案上验证；
+- 视频必须重新编码，不可能与原片逐像素完全相同；
+- Dolby Vision RPU来自原片，但作用于重新编码后的基础层；
+- VideoToolbox Q65是实验选项，长期档案默认推荐 x265 CRF 8；
+- Lightroom兼容性结论来自实际边界测试，不代表 Adobe 的官方完整规格；
+- 本项目与 Vivo、Adobe、Dolby、Apple、FFmpeg、PyAV 或 dovi_tool 的作者没有隶属或背书关系。
 
 项目代码采用 [MIT License](LICENSE)。第三方依赖遵循各自许可证。
-
-本项目与 Vivo、Adobe、Lightroom、Dolby、Apple、FFmpeg、PyAV 或 dovi_tool 的作者没有隶属或背书关系。Dolby Vision、Lightroom 等名称仅用于描述兼容性。

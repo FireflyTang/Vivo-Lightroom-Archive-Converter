@@ -11,7 +11,7 @@
         self.wantsLayer = YES;
         self.layer.backgroundColor = [[NSColor controlBackgroundColor] CGColor];
         self.layer.cornerRadius = 10;
-        NSTextField *label = [NSTextField labelWithString:@"把一个或多个原始 MP4 拖到这里\n先严格检查，通过后才允许转换"];
+        NSTextField *label = [NSTextField labelWithString:@"把一个或多个 Vivo X200 Ultra 原始 MP4 拖到这里\n自动识别已验证档案；逐项核对后才允许转换"];
         label.alignment = NSTextAlignmentCenter;
         label.font = [NSFont systemFontOfSize:15 weight:NSFontWeightMedium];
         label.textColor = NSColor.secondaryLabelColor;
@@ -76,7 +76,7 @@
     icon.imageScaling = NSImageScaleProportionallyUpOrDown;
     NSTextField *title = [NSTextField labelWithString:@"Vivo Lightroom 档案转换器"];
     title.font = [NSFont systemFontOfSize:24 weight:NSFontWeightSemibold];
-    NSTextField *subtitle = [NSTextField labelWithString:@"严格核对输入结构，保留已验证元数据，不覆盖原片或已有输出。"];
+    NSTextField *subtitle = [NSTextField labelWithString:@"自适应处理已验证的 1080p/4K、SDR/HLG 档案；未知信息不静默丢弃。"];
     subtitle.textColor = NSColor.secondaryLabelColor;
     DropView *drop = [[DropView alloc] initWithFrame:NSZeroRect];
     self.chooseButton = [NSButton buttonWithTitle:@"选择视频…" target:self action:@selector(chooseFiles:)];
@@ -208,13 +208,14 @@
 }
 - (NSString *)summaryForInspection:(NSDictionary *)j {
     NSString *size=[NSByteCountFormatter stringFromByteCount:[j[@"size_bytes"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
-    return [NSString stringWithFormat:@"%@×%@ · %.3f fps · %@帧 · %.3f秒 · %@ · %@ · EIS %@包",
+    return [NSString stringWithFormat:@"%@ · %@×%@ · %.3f fps · %@帧 · %.3f秒 · %@ · 方向%@° · EIS %@包",
+        j[@"archive_profile"] ?: @"未知档案",
         j[@"width"] ?: @"?",j[@"height"] ?: @"?",[j[@"fps"] doubleValue],j[@"frame_count"] ?: @"?",
-        [j[@"duration"] doubleValue],size,j[@"video_profile"] ?: @"?",j[@"eis_packets"] ?: @"?"];
+        [j[@"duration"] doubleValue],size,j[@"rotation"] ?: @"?",j[@"eis_packets"] ?: @"?"];
 }
 - (void)showSelectedFileDetails {
     NSInteger index=self.fileTable.selectedRow;
-    if (index<0 || index>=self.fileRows.count) {
+    if (index<0 || (NSUInteger)index>=self.fileRows.count) {
         self.detailView.string=@"选择一个输入文件以查看完整信息与校验清单。"; return;
     }
     NSDictionary *row=self.fileRows[index]; NSDictionary *j=row[@"inspection"];
@@ -227,9 +228,9 @@
     NSString *size=[NSByteCountFormatter stringFromByteCount:[j[@"size_bytes"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
     NSMutableString *text=[NSMutableString string];
     [text appendFormat:@"输入文件\n%@\n\n完整路径\n%@\n\n",j[@"name"] ?: @"?",j[@"path"] ?: @"?"];
-    [text appendFormat:@"视频\n%@×%@ · %.6f fps · %@帧 · %.3f秒 · %@\n%@ / %@ / %@\n\n",
+    [text appendFormat:@"视频\n%@\n%@×%@ · %.6f fps · %@帧 · %.3f秒 · %@\n%@ / %@ / %@ · 显示方向 %@°\n\n",value(j[@"archive_profile"]),
         j[@"width"] ?: @"?",j[@"height"] ?: @"?",[j[@"fps"] doubleValue],j[@"frame_count"] ?: @"?",
-        [j[@"duration"] doubleValue],size,j[@"video_codec"] ?: @"?",j[@"video_profile"] ?: @"?",j[@"pixel_format"] ?: @"?"];
+        [j[@"duration"] doubleValue],size,j[@"video_codec"] ?: @"?",j[@"video_profile"] ?: @"?",j[@"pixel_format"] ?: @"?",value(j[@"rotation"])] ;
     [text appendFormat:@"音频与附加数据\n%@\n%@ · EIS %@包\n\n",value(j[@"audio_description"]),value(j[@"dolby_vision"]),value(j[@"eis_packets"])];
     [text appendFormat:@"拍摄信息\n设备：%@\n时间：%@\nGPS：%@\n\n校验清单\n",value(j[@"device"]),value(j[@"creation_time"]),value(j[@"location"])];
     for (NSDictionary *check in j[@"checks"] ?: @[]) {
@@ -238,11 +239,17 @@
         [text appendFormat:@"%@ %@\n   %@\n",symbol,check[@"name"] ?: @"未命名项目",check[@"detail"] ?: @""];
     }
     if ([j[@"reasons"] count]) [text appendFormat:@"\n拒绝原因\n%@",[j[@"reasons"] componentsJoinedByString:@"\n"]];
+    NSDictionary *ledger=j[@"metadata_ledger"];
+    if ([ledger isKindOfClass:NSDictionary.class]) {
+        NSArray *keys=[ledger[@"format_metadata_keys"] isKindOfClass:NSArray.class] ? ledger[@"format_metadata_keys"] : @[];
+        [text appendFormat:@"\n\n元信息安全账本\n%@\nUUID：%@个，逐字节核验\nudta/GPS：%@\nMovie metadata：%@\n发现字段：%@",
+            value(ledger[@"policy"]),value(ledger[@"top_level_uuid_count"]),value(ledger[@"udta"]),value(ledger[@"movie_meta"]),[keys componentsJoinedByString:@"、"]];
+    }
     NSDictionary *verification=row[@"verification"];
     if ([verification isKindOfClass:NSDictionary.class]) {
         [text appendFormat:@"\n\n转换结果\n✓ 输出文件已完成全部复检\n%@\n%@\n",
             verification[@"mode"] ?: @"", verification[@"path"] ?: @""];
-        [text appendString:@"视频参数与方向 · 帧数与PTS · AAC逐包哈希 · EIS逐包哈希\nDolby Vision配置与RPU · 单时间层 · 完整解码 · 元数据与来源记录"];
+        [text appendString:@"视频参数与方向 · 帧数与PTS · AAC/EIS逐包哈希\n未知元信息字节账本 · Dolby Vision条件核验 · 全码流单层\n画质抽样 · 完整解码 · 来源哈希与必要变化记录"];
     }
     self.detailView.string=text;
 }
@@ -519,6 +526,7 @@
 @end
 
 int main(int argc,const char *argv[]) {
+    (void)argc; (void)argv;
     @autoreleasepool { NSApplication *app=[NSApplication sharedApplication]; AppDelegate *d=[AppDelegate new]; app.delegate=d; [app run]; }
     return 0;
 }
