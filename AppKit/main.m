@@ -1,5 +1,18 @@
 #import <Cocoa/Cocoa.h>
 
+static NSNumber *NumericValue(id object) {
+    return [object isKindOfClass:NSNumber.class] ? object : nil;
+}
+
+static NSString *DisplayValue(id object, NSString *fallback) {
+    return (!object || object == NSNull.null || ![[object description] length]) ? fallback : [object description];
+}
+
+static NSString *FormattedNumber(id object, NSUInteger decimals, NSString *fallback) {
+    NSNumber *number = NumericValue(object);
+    return number ? [NSString stringWithFormat:@"%.*f", (int)decimals, number.doubleValue] : fallback;
+}
+
 @interface DropView : NSView
 @property (copy) void (^filesDropped)(NSArray<NSURL *> *);
 @end
@@ -11,7 +24,7 @@
         self.wantsLayer = YES;
         self.layer.backgroundColor = [[NSColor controlBackgroundColor] CGColor];
         self.layer.cornerRadius = 10;
-        NSTextField *label = [NSTextField labelWithString:@"把一个或多个 Vivo X200 Ultra 原始 MP4 拖到这里\n自动识别已验证档案；逐项核对后才允许转换"];
+        NSTextField *label = [NSTextField labelWithString:@"把 Vivo X200 Ultra 原始 MP4 或文件夹拖到这里\n文件夹自动展开第一层 MP4；逐项核对后才允许转换"];
         label.alignment = NSTextAlignmentCenter;
         label.font = [NSFont systemFontOfSize:15 weight:NSFontWeightMedium];
         label.textColor = NSColor.secondaryLabelColor;
@@ -53,6 +66,7 @@
 @property NSUInteger currentJobIndex;
 @property NSUInteger currentJobTotal;
 @property NSString *currentJobName;
+@property NSOperationQueue *inspectionQueue;
 @end
 
 @implementation AppDelegate
@@ -60,6 +74,10 @@
     self.accepted = [NSMutableArray array];
     self.knownPaths = [NSMutableSet set];
     self.fileRows = [NSMutableArray array];
+    self.inspectionQueue = [NSOperationQueue new];
+    self.inspectionQueue.name = @"VivoInputInspectionQueue";
+    self.inspectionQueue.qualityOfService = NSQualityOfServiceUserInitiated;
+    self.inspectionQueue.maxConcurrentOperationCount = 2;
     self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1100,760)
         styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable
         backing:NSBackingStoreBuffered defer:NO];
@@ -79,7 +97,7 @@
     NSTextField *subtitle = [NSTextField labelWithString:@"自适应处理已验证的 1080p/4K、SDR/HLG 档案；未知信息不静默丢弃。"];
     subtitle.textColor = NSColor.secondaryLabelColor;
     DropView *drop = [[DropView alloc] initWithFrame:NSZeroRect];
-    self.chooseButton = [NSButton buttonWithTitle:@"选择视频…" target:self action:@selector(chooseFiles:)];
+    self.chooseButton = [NSButton buttonWithTitle:@"选择视频或文件夹…" target:self action:@selector(chooseFiles:)];
     self.convertButton = [NSButton buttonWithTitle:@"转换全部合格项" target:self action:@selector(convertAll:)];
     self.convertButton.enabled = NO;
     self.hardwareButton = [NSButton checkboxWithTitle:@"使用 VideoToolbox 硬件编码（实验，Q65）" target:self action:@selector(hardwareChanged:)];
@@ -207,11 +225,12 @@
     return nil;
 }
 - (NSString *)summaryForInspection:(NSDictionary *)j {
-    NSString *size=[NSByteCountFormatter stringFromByteCount:[j[@"size_bytes"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
-    return [NSString stringWithFormat:@"%@ · %@×%@ · %.3f fps · %@帧 · %.3f秒 · %@ · 方向%@° · EIS %@包",
-        j[@"archive_profile"] ?: @"未知档案",
-        j[@"width"] ?: @"?",j[@"height"] ?: @"?",[j[@"fps"] doubleValue],j[@"frame_count"] ?: @"?",
-        [j[@"duration"] doubleValue],size,j[@"rotation"] ?: @"?",j[@"eis_packets"] ?: @"?"];
+    NSNumber *sizeValue=NumericValue(j[@"size_bytes"]);
+    NSString *size=sizeValue ? [NSByteCountFormatter stringFromByteCount:sizeValue.longLongValue countStyle:NSByteCountFormatterCountStyleFile] : @"未知大小";
+    return [NSString stringWithFormat:@"%@ · %@×%@ · %@ fps · %@帧 · %@秒 · %@ · 方向%@° · EIS %@包",
+        DisplayValue(j[@"archive_profile"], @"未知档案"),
+        DisplayValue(j[@"width"], @"?"),DisplayValue(j[@"height"], @"?"),FormattedNumber(j[@"fps"],3,@"?"),DisplayValue(j[@"frame_count"],@"?"),
+        FormattedNumber(j[@"duration"],3,@"?"),size,DisplayValue(j[@"rotation"],@"?"),DisplayValue(j[@"eis_packets"],@"?")];
 }
 - (void)showSelectedFileDetails {
     NSInteger index=self.fileTable.selectedRow;
@@ -225,12 +244,13 @@
     NSString *(^value)(id)=^NSString *(id object) {
         return (!object || object==NSNull.null || ![[object description] length]) ? @"未提供" : [object description];
     };
-    NSString *size=[NSByteCountFormatter stringFromByteCount:[j[@"size_bytes"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
+    NSNumber *sizeValue=NumericValue(j[@"size_bytes"]);
+    NSString *size=sizeValue ? [NSByteCountFormatter stringFromByteCount:sizeValue.longLongValue countStyle:NSByteCountFormatterCountStyleFile] : @"未知大小";
     NSMutableString *text=[NSMutableString string];
     [text appendFormat:@"输入文件\n%@\n\n完整路径\n%@\n\n",j[@"name"] ?: @"?",j[@"path"] ?: @"?"];
-    [text appendFormat:@"视频\n%@\n%@×%@ · %.6f fps · %@帧 · %.3f秒 · %@\n%@ / %@ / %@ · 显示方向 %@°\n\n",value(j[@"archive_profile"]),
-        j[@"width"] ?: @"?",j[@"height"] ?: @"?",[j[@"fps"] doubleValue],j[@"frame_count"] ?: @"?",
-        [j[@"duration"] doubleValue],size,j[@"video_codec"] ?: @"?",j[@"video_profile"] ?: @"?",j[@"pixel_format"] ?: @"?",value(j[@"rotation"])] ;
+    [text appendFormat:@"视频\n%@\n%@×%@ · %@ fps · %@帧 · %@秒 · %@\n%@ / %@ / %@ · 显示方向 %@°\n\n",value(j[@"archive_profile"]),
+        value(j[@"width"]),value(j[@"height"]),FormattedNumber(j[@"fps"],6,@"?"),value(j[@"frame_count"]),
+        FormattedNumber(j[@"duration"],3,@"?"),size,value(j[@"video_codec"]),value(j[@"video_profile"]),value(j[@"pixel_format"]),value(j[@"rotation"])] ;
     [text appendFormat:@"音频与附加数据\n%@\n%@ · EIS %@包\n\n",value(j[@"audio_description"]),value(j[@"dolby_vision"]),value(j[@"eis_packets"])];
     [text appendFormat:@"拍摄信息\n设备：%@\n时间：%@\nGPS：%@\n\n校验清单\n",value(j[@"device"]),value(j[@"creation_time"]),value(j[@"location"])];
     for (NSDictionary *check in j[@"checks"] ?: @[]) {
@@ -402,9 +422,55 @@
     if (error) *error=[[NSString alloc] initWithData:ed encoding:NSUTF8StringEncoding];
     return task.terminationStatus==0;
 }
+- (BOOL)isArchiveOutputURL:(NSURL *)url {
+    NSString *name=url.lastPathComponent.lowercaseString;
+    return [name hasSuffix:@"_lr_crf8_archive.mp4"] || [name hasSuffix:@"_lr_vt_q65_archive.mp4"];
+}
+- (NSArray<NSURL *> *)expandedVideoURLs:(NSArray<NSURL *> *)urls {
+    NSMutableArray<NSURL *> *videos=[NSMutableArray array];
+    NSFileManager *fm=NSFileManager.defaultManager;
+    NSArray *keys=@[NSURLIsDirectoryKey,NSURLIsRegularFileKey];
+    for (NSURL *url in urls) {
+        NSNumber *isDirectory=nil,*isRegular=nil;
+        NSError *resourceError=nil;
+        if (![url getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:&resourceError]) {
+            [self append:[NSString stringWithFormat:@"忽略无法读取的项目：%@（%@）",url.path,resourceError.localizedDescription ?: @"未知错误"]];
+            continue;
+        }
+        if (isDirectory.boolValue) {
+            NSError *listError=nil;
+            NSArray<NSURL *> *children=[fm contentsOfDirectoryAtURL:url includingPropertiesForKeys:keys
+                options:NSDirectoryEnumerationSkipsHiddenFiles error:&listError];
+            if (!children) {
+                [self append:[NSString stringWithFormat:@"无法展开文件夹：%@（%@）",url.path,listError.localizedDescription ?: @"未知错误"]];
+                continue;
+            }
+            children=[children sortedArrayUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
+                return [a.lastPathComponent localizedStandardCompare:b.lastPathComponent];
+            }];
+            NSUInteger before=videos.count;
+            for (NSURL *child in children) {
+                isRegular=nil;
+                [child getResourceValue:&isRegular forKey:NSURLIsRegularFileKey error:nil];
+                if (isRegular.boolValue && [child.pathExtension.lowercaseString isEqualToString:@"mp4"] && ![self isArchiveOutputURL:child])
+                    [videos addObject:child];
+            }
+            [self append:[NSString stringWithFormat:@"展开文件夹：%@ — 找到 %lu 个原始 MP4",url.path,(unsigned long)(videos.count-before)]];
+        } else {
+            isRegular=nil;
+            [url getResourceValue:&isRegular forKey:NSURLIsRegularFileKey error:nil];
+            if (isRegular.boolValue && [url.pathExtension.lowercaseString isEqualToString:@"mp4"] && ![self isArchiveOutputURL:url])
+                [videos addObject:url];
+            else
+                [self append:[NSString stringWithFormat:@"忽略非原始 MP4：%@",url.path]];
+        }
+    }
+    return videos;
+}
 - (void)addFiles:(NSArray<NSURL *> *)urls {
     NSAssert(NSThread.isMainThread, @"addFiles must run on the main thread");
     if (self.isConverting) { [self append:@"转换进行中，暂不接受新文件。"] ; return; }
+    urls=[self expandedVideoURLs:urls];
     NSMutableArray<NSURL *> *fresh = [NSMutableArray array];
     for (NSURL *url in urls) {
         NSString *path = url.URLByStandardizingPath.path;
@@ -433,7 +499,8 @@
         NSMutableDictionary *initialRow=[self rowForURL:url]; initialRow[@"status"]=@"正在检查";
         [self.fileTable reloadData];
         [self append:[NSString stringWithFormat:@"\n检查：%@",url.path]];
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
+        [self.inspectionQueue addOperationWithBlock:^{
+            @autoreleasepool {
             NSString *out=nil,*err=nil; NSDictionary *j=[self runEngine:@[@"inspect",url.path] text:&out error:&err];
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (generation != self.inspectionGeneration) return;
@@ -446,8 +513,8 @@
                 } else if ([j[@"accepted"] boolValue]) {
                     if (![self.accepted containsObject:url]) [self.accepted addObject:url];
                     row[@"status"]=@"检查通过"; row[@"summary"]=[self summaryForInspection:j]; row[@"inspection"]=j;
-                    [self append:[NSString stringWithFormat:@"✓ 通过 | %@×%@ | %@帧 | %.3ffps | %.3f秒 | %@ | EIS %@包\n  设备：%@  GPS：%@  时间：%@",
-                        j[@"width"],j[@"height"],j[@"frame_count"],[j[@"fps"] doubleValue],[j[@"duration"] doubleValue],j[@"dolby_vision"],j[@"eis_packets"],j[@"device"],j[@"location"],j[@"creation_time"]]];
+                    [self append:[NSString stringWithFormat:@"✓ 通过 | %@×%@ | %@帧 | %@fps | %@秒 | %@ | EIS %@包\n  设备：%@  GPS：%@  时间：%@",
+                        DisplayValue(j[@"width"],@"?"),DisplayValue(j[@"height"],@"?"),DisplayValue(j[@"frame_count"],@"?"),FormattedNumber(j[@"fps"],3,@"?"),FormattedNumber(j[@"duration"],3,@"?"),DisplayValue(j[@"dolby_vision"],@"未提供"),DisplayValue(j[@"eis_packets"],@"?"),DisplayValue(j[@"device"],@"未提供"),DisplayValue(j[@"location"],@"未提供"),DisplayValue(j[@"creation_time"],@"未提供")]];
                 } else {
                     self.rejectedChecks++;
                     row[@"status"]=@"拒绝转换"; row[@"summary"]=[self summaryForInspection:j]; row[@"inspection"]=j;
@@ -456,11 +523,12 @@
                 [self reloadRowForURL:url];
                 [self updateInspectionStatus];
             });
-        });
+            }
+        }];
     }
 }
 - (void)chooseFiles:(id)sender {
-    NSOpenPanel *p=[NSOpenPanel openPanel];p.allowsMultipleSelection=YES;p.canChooseDirectories=NO;
+    NSOpenPanel *p=[NSOpenPanel openPanel];p.allowsMultipleSelection=YES;p.canChooseDirectories=YES;p.canChooseFiles=YES;
     if ([p runModal]==NSModalResponseOK) [self addFiles:p.URLs];
 }
 - (void)convertAll:(id)sender {
@@ -513,6 +581,7 @@
 }
 - (void)clearLog:(id)sender {
     self.inspectionGeneration++;
+    [self.inspectionQueue cancelAllOperations];
     self.pendingChecks=0;
     self.rejectedChecks=0;
     self.logView.string=@"";

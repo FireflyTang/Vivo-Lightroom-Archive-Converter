@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.9.1 — 2026-08-27
+
+- Fixed a crash when a dragged folder or malformed MP4 produced unavailable numeric inspection fields.
+- Added first-level MP4 expansion when a folder is dragged or selected; generated archive outputs and non-MP4 items are ignored.
+- Limited input inspection to two concurrent workers so large folder drops cannot launch an unbounded number of FFmpeg processes.
+- Added safe unknown-value rendering throughout the file summary and detail views.
+
 ## v1.9 — 2026-08-26
 
 - Replaced the single-reference byte fingerprint with a bounded semantic allowlist covering the 86 inspected Vivo X200 Ultra files: 1080p30 SDR, 4K60 SDR and 4K60 HLG/Dolby Vision 8.4.
