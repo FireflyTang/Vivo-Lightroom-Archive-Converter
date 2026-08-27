@@ -3,6 +3,8 @@ import collections, hashlib, json, mmap, re, shutil, struct, subprocess, sys, te
 from pathlib import Path
 
 ARCHIVE_UUID = uuid.UUID("8d67d6b7-1137-5aed-b5d8-ea729a438af2").bytes
+PROBE_BYTES = 256 * 1024 * 1024
+ANALYZE_MICROSECONDS = 100 * 1000 * 1000
 
 
 def run(args, stdout=subprocess.PIPE):
@@ -13,7 +15,13 @@ def run(args, stdout=subprocess.PIPE):
 
 
 def probe(ffprobe, path, extra):
-    out, _ = run([ffprobe, "-v", "error", *extra, "-of", "json", path])
+    # CRF 8 can make the first HEVC access unit larger than FFprobe's default
+    # 5 MiB probe budget.  In that case valid AAC-LC extradata is present, but
+    # FFprobe reports profile=None because it has not reached the first audio
+    # packet yet.  Keep the semantic check strict and give probing enough bytes
+    # to actually identify every stream.
+    out, _ = run([ffprobe, "-v", "error", "-probesize", PROBE_BYTES,
+                  "-analyzeduration", ANALYZE_MICROSECONDS, *extra, "-of", "json", path])
     return json.loads(out)
 
 

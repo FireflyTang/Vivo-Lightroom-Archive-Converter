@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.9.2 — 2026-08-27
+
+- Fixed false AAC-profile failures on very high bitrate x265 CRF 8 outputs.
+- Increased FFprobe's validation probe budget so it can reach the first AAC packet when a large initial HEVC access unit exceeds the default 5 MiB limit.
+- Kept all existing AAC-LC semantic, packet timing and packet payload checks unchanged; this does not relax output validation.
+
 ## v1.9.1 — 2026-08-27
 
 - Fixed a crash when a dragged folder or malformed MP4 produced unavailable numeric inspection fields.
