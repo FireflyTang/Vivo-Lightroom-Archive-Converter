@@ -44,7 +44,15 @@ def set_first_elst(b,tr,duration):
 def resize_remove(b,moov,tr,box):
  n=box[1];struct.pack_into(">I",b,moov[0],moov[1]-n);struct.pack_into(">I",b,tr[0],tr[1]-n);del b[box[0]:box[0]+n];return n
 def grow_free(b,n):
- fr=next(x for x in boxes(b) if x[2]==b"free");old=bytes(b[fr[0]:fr[0]+fr[1]]);newsize=fr[1]+n
+ fr=next((x for x in boxes(b) if x[2]==b"free"),None)
+ # Large PyAV outputs can omit the optional top-level free box entirely.
+ # remove_lavf() has already removed n bytes from moov at this point, so
+ # replacing exactly those bytes with a new free box keeps mdat and every
+ # sample offset unchanged.
+ if fr is None:
+  if n<8:raise ValueError("cannot create a top-level free box without moving media offsets")
+  b.extend(struct.pack(">I4s",n,b"free")+b"\0"*(n-8));return
+ old=bytes(b[fr[0]:fr[0]+fr[1]]);newsize=fr[1]+n
  if newsize<8:raise ValueError("insufficient top-level free space")
  payload=old[8:newsize] if n<0 else old[8:]+b"\0"*n
  b[fr[0]:fr[0]+fr[1]]=struct.pack(">I4s",newsize,b"free")+payload

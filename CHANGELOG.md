@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.9.3 — 2026-08-29
+
+- Fixed a post-encode MP4 finalization failure on large PyAV outputs that omit the optional top-level `free` box.
+- Replaces the removed encoder-identification metadata with an equal-size standards-compliant `free` box, keeping `mdat` and every media sample offset unchanged.
+- Added a regression test for the no-`free` layout and verified the affected Vivo X200 Ultra source preserves AAC, EIS, display matrix, UUID, `udta`/GPS, movie metadata, frame count and PTS through finalization.
+
 ## v1.9.2 — 2026-08-27
 
 - Fixed false AAC-profile failures on very high bitrate x265 CRF 8 outputs.
