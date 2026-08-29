@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import hashlib, json, shutil, struct, subprocess, sys, uuid
+import hashlib, json, os, shutil, struct, subprocess, sys, uuid
 from pathlib import Path
 
 U = uuid.UUID("8d67d6b7-1137-5aed-b5d8-ea729a438af2")
@@ -49,9 +49,12 @@ def main(src, converted, out, mode="cpu"):
     }
     payload = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     box = struct.pack(">I4s", 24 + len(payload), b"uuid") + U.bytes + payload
-    with open(out, "wb") as dst, open(converted, "rb") as inp:
-        shutil.copyfileobj(inp, dst, 8 * 1024 * 1024)
-        dst.write(box)
+    # Both paths are disposable files beside the source.  Rename the fully
+    # finalized intermediate atomically, then append the provenance box.  The
+    # previous implementation copied multi-gigabyte CRF 8 outputs one extra
+    # time without changing a single existing byte.
+    os.replace(converted, out)
+    with open(out, "ab") as dst: dst.write(box)
 
 
 if __name__ == "__main__":

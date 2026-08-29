@@ -12,11 +12,15 @@ def annexb_nals(path):
             chunk = f.read(4 * 1024 * 1024)
             if chunk: buf += chunk
             else: eof = True
+            # bytes.find() runs in native code.  The previous byte-at-a-time
+            # Python loop became the dominant cost for CRF 8 streams that can
+            # exceed 10 GiB, despite producing exactly the same NAL boundaries.
             starts = []; i = 0
-            while i + 3 <= len(buf):
-                if i + 4 <= len(buf) and buf[i:i + 4] == b"\0\0\0\1": starts.append((i, i + 4)); i += 4
-                elif buf[i:i + 3] == b"\0\0\1": starts.append((i, i + 3)); i += 3
-                else: i += 1
+            while True:
+                marker = buf.find(b"\0\0\1", i)
+                if marker < 0: break
+                prefix = marker - 1 if marker > 0 and buf[marker - 1] == 0 else marker
+                starts.append((prefix, marker + 3)); i = marker + 3
             limit = len(starts) if eof else max(0, len(starts) - 1)
             for n in range(limit):
                 start = starts[n][1]; end = starts[n + 1][0] if n + 1 < len(starts) else len(buf)

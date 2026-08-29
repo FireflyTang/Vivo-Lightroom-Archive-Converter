@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import hashlib, importlib.util, json, mmap, os, shutil, struct, subprocess, sys, uuid
+import hashlib, importlib.util, json, mmap, os, shutil, struct, subprocess, sys, time, uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 RESOURCE = Path(os.environ.get("VAC_RESOURCE_DIR", Path(__file__).resolve().parents[1]))
@@ -277,6 +278,18 @@ def progress(value, msg):
     print(f"PROGRESS\t{value:.3f}\t{msg}", flush=True)
 
 
+@contextmanager
+def timed(name):
+    started = time.monotonic()
+    try:
+        yield
+    except Exception:
+        print(f"TIMING\t{name}\t{time.monotonic() - started:.3f}\tFAILED", flush=True)
+        raise
+    else:
+        print(f"TIMING\t{name}\t{time.monotonic() - started:.3f}\tPASS", flush=True)
+
+
 def convert(path, hardware=False):
     missing = []
     for name, tool in (("ffmpeg", FFMPEG), ("ffprobe", FFPROBE)):
@@ -308,8 +321,9 @@ def convert(path, hardware=False):
         has_dv = audit["has_dolby_vision"]
         if has_dv:
             progress(.03, "提取并核验 Dolby Vision RPU")
-            run([FFMPEG, "-v", "error", "-i", src, "-map", "0:v:0", "-c", "copy", "-bsf:v", "hevc_mp4toannexb", "-f", "hevc", raw_src], capture=False)
-            run([DOVI, "extract-rpu", "-i", raw_src, "-o", rpu], capture=False)
+            with timed("提取并核验 Dolby Vision RPU"):
+                run([FFMPEG, "-v", "error", "-i", src, "-map", "0:v:0", "-c", "copy", "-bsf:v", "hevc_mp4toannexb", "-f", "hevc", raw_src], capture=False)
+                run([DOVI, "extract-rpu", "-i", raw_src, "-o", rpu], capture=False)
         else:
             progress(.03, "确认 SDR 输入，不添加 HDR 或 Dolby Vision")
         progress(.10, ("VideoToolbox Q65" if hardware else "x265 CRF 8") + f" · {audit['archive_profile']} · 单时间层编码")
@@ -324,26 +338,34 @@ def convert(path, hardware=False):
             color += ["-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc"]
         else:
             color += ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]
-        run([FFMPEG, "-hide_banner", "-loglevel", "error", "-noautorotate", "-i", src, "-map", "0:v:0", "-an", "-sn", "-dn",
-             *encode_args, *color, "-fps_mode", "passthrough", "-tag:v", "hvc1", encoded_mp4], capture=False)
-        run([FFMPEG, "-v", "error", "-i", encoded_mp4, "-map", "0:v:0", "-c", "copy", "-bsf:v", "hevc_mp4toannexb,hevc_metadata=aud=insert", "-f", "hevc", encoded], capture=False)
+        with timed("单时间层 HEVC 编码"):
+            run([FFMPEG, "-hide_banner", "-loglevel", "error", "-noautorotate", "-i", src, "-map", "0:v:0", "-an", "-sn", "-dn",
+                 *encode_args, *color, "-fps_mode", "passthrough", "-tag:v", "hvc1", encoded_mp4], capture=False)
+        with timed("提取编码码流并插入 AUD"):
+            run([FFMPEG, "-v", "error", "-i", encoded_mp4, "-map", "0:v:0", "-c", "copy", "-bsf:v", "hevc_mp4toannexb,hevc_metadata=aud=insert", "-f", "hevc", encoded], capture=False)
         if has_dv:
             progress(.62, "逐帧重新注入原始 Dolby Vision RPU")
-            run([DOVI, "inject-rpu", "-i", encoded, "-r", rpu, "-o", dv_hevc], capture=False)
-            run([FFMPEG, "-v", "error", "-r", str(audit["nominal_fps"]), "-i", dv_hevc, "-c", "copy", "-tag:v", "hvc1", dv_template], capture=False)
+            with timed("逐帧重新注入原始 Dolby Vision RPU"):
+                run([DOVI, "inject-rpu", "-i", encoded, "-r", rpu, "-o", dv_hevc], capture=False)
+                run([FFMPEG, "-v", "error", "-r", str(audit["nominal_fps"]), "-i", dv_hevc, "-c", "copy", "-tag:v", "hvc1", dv_template], capture=False)
             video_es, template = dv_hevc, dv_template
         else:
             video_es, template = encoded, encoded_mp4
         progress(.70, "恢复原始视频 PTS 与 AAC 压缩包")
-        run([PYTHON, ENGINE / "mux_exact.py", src, encoded_mp4, video_es, template, avmux], capture=False)
+        with timed("恢复原始视频 PTS 与 AAC 压缩包"):
+            run([PYTHON, ENGINE / "mux_exact.py", src, encoded_mp4, video_es, template, avmux], capture=False)
         progress(.77, "逐包复制原始 EIS 轨道")
-        run([PYTHON, ENGINE / "inject_eis.py", src, avmux, eis], capture=False)
+        with timed("逐包复制原始 EIS 轨道"):
+            run([PYTHON, ENGINE / "inject_eis.py", src, avmux, eis], capture=False)
         progress(.83, "恢复方向、GPS、时间与未知独立元信息")
-        run([PYTHON, ENGINE / "finalize_mp4.py", src, eis, finalmeta], capture=False)
-        run([PYTHON, ENGINE / "append_provenance.py", src, finalmeta, temp_out, "hardware" if hardware else "cpu"], capture=False)
+        with timed("恢复方向、GPS、时间与未知独立元信息"):
+            run([PYTHON, ENGINE / "finalize_mp4.py", src, eis, finalmeta], capture=False)
+        with timed("写入来源与转换记录"):
+            run([PYTHON, ENGINE / "append_provenance.py", src, finalmeta, temp_out, "hardware" if hardware else "cpu"], capture=False)
         os.utime(temp_out, ns=(src.stat().st_atime_ns, src.stat().st_mtime_ns))
         progress(.88, "运行独立的完整输出复检")
-        run([PYTHON, ENGINE / "validate_output.py", src, temp_out, DOVI, FFMPEG, FFPROBE, "hardware" if hardware else "cpu"], capture=False)
+        with timed("独立完整输出复检"):
+            run([PYTHON, ENGINE / "validate_output.py", src, temp_out, DOVI, FFMPEG, FFPROBE, "hardware" if hardware else "cpu"], capture=False)
         os.replace(temp_out, out)
     progress(1, "完成，全部核验通过")
     print(f"OUTPUT\t{out}", flush=True)

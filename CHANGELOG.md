@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.9.4 — 2026-08-29
+
+- Replaced the Python byte-at-a-time Annex-B scanner with an equivalent native `bytes.find` streaming scanner. A 1.1 GB real-world PTS/AAC rebuild fell from about 343 seconds to 5.34 seconds while producing a byte-identical MP4.
+- Removed one redundant full-output copy when appending the provenance UUID; the finalized temporary MP4 is now atomically renamed and then appended in place.
+- Added per-stage elapsed-time records to the live log.
+- Added mixed three-/four-byte and cross-read-boundary Annex-B regression coverage.
+
 ## v1.9.3 — 2026-08-29
 
 - Fixed a post-encode MP4 finalization failure on large PyAV outputs that omit the optional top-level `free` box.
